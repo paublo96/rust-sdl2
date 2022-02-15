@@ -468,6 +468,17 @@ fn main() {
         );
     }
 
+    // Add environment var to specify prebuilt SDL2 stataic lib location
+    #[cfg(feature = "static-link")]
+    {
+        if let Ok(sdl_path) = env::var("SDL2_STATIC_LIB_PATH") {
+            println!(
+                "cargo:rustc-link-search={}",
+                sdl_path.display()
+            );
+        }
+    }
+
     let sdl2_includes = sdl2_source_path
         .join("include")
         .to_str()
