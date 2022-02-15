@@ -474,7 +474,7 @@ fn main() {
         if let Ok(sdl_path) = env::var("SDL2_STATIC_LIB_PATH") {
             println!(
                 "cargo:rustc-link-search={}",
-                sdl_path.display()
+                sdl_path
             );
         }
     }
