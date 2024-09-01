@@ -180,6 +180,49 @@ impl AudioSubsystem {
             }
         }
     }
+
+    #[doc(alias = "SDL_GetAudioDeviceSpec")]
+    pub fn audio_playback_device_spec(&self, index: u32) -> Result<AudioSpec, String> {
+        let mut spec = sys::SDL_AudioSpec {
+            freq: 0,
+            format: 0,
+            channels: 0,
+            silence: 0,
+            samples: 0,
+            padding: 0,
+            size: 0,
+            callback: None,
+            userdata: ptr::null_mut(),
+        };
+
+        let result = unsafe { sys::SDL_GetAudioDeviceSpec(index as c_int, 0, &mut spec) };
+        if result != 0 {
+            Err(get_error())
+        } else {
+            Ok(AudioSpec::convert_from_ll(spec))
+        }
+    }
+    #[doc(alias = "SDL_GetAudioDeviceSpec")]
+    pub fn audio_capture_device_spec(&self, index: u32) -> Result<AudioSpec, String> {
+        let mut spec = sys::SDL_AudioSpec {
+            freq: 0,
+            format: 0,
+            channels: 0,
+            silence: 0,
+            samples: 0,
+            padding: 0,
+            size: 0,
+            callback: None,
+            userdata: ptr::null_mut(),
+        };
+
+        let result = unsafe { sys::SDL_GetAudioDeviceSpec(index as c_int, 1, &mut spec) };
+        if result != 0 {
+            Err(get_error())
+        } else {
+            Ok(AudioSpec::convert_from_ll(spec))
+        }
+    }
 }
 
 #[repr(i32)]
@@ -309,6 +352,18 @@ pub struct DriverIterator {
     index: i32,
 }
 
+// panics if SDL_GetAudioDriver returns a null pointer,
+// which only happens if index is outside the range
+// 0..SDL_GetNumAudioDrivers()
+fn get_audio_driver(index: i32) -> &'static str {
+    unsafe {
+        let buf = sys::SDL_GetAudioDriver(index);
+        assert!(!buf.is_null());
+
+        CStr::from_ptr(buf as *const _).to_str().unwrap()
+    }
+}
+
 impl Iterator for DriverIterator {
     type Item = &'static str;
 
@@ -317,24 +372,60 @@ impl Iterator for DriverIterator {
         if self.index >= self.length {
             None
         } else {
-            unsafe {
-                let buf = sys::SDL_GetAudioDriver(self.index);
-                assert!(!buf.is_null());
-                self.index += 1;
+            let driver = get_audio_driver(self.index);
+            self.index += 1;
 
-                Some(CStr::from_ptr(buf as *const _).to_str().unwrap())
-            }
+            Some(driver)
         }
     }
 
     #[inline]
     fn size_hint(&self) -> (usize, Option<usize>) {
-        let l = self.length as usize;
-        (l, Some(l))
+        let remaining = (self.length - self.index) as usize;
+        (remaining, Some(remaining))
+    }
+
+    #[inline]
+    fn nth(&mut self, n: usize) -> Option<&'static str> {
+        use std::convert::TryInto;
+
+        self.index = match n.try_into().ok().and_then(|n| self.index.checked_add(n)) {
+            Some(index) if index < self.length => index,
+            _ => self.length,
+        };
+
+        self.next()
+    }
+}
+
+impl DoubleEndedIterator for DriverIterator {
+    #[inline]
+    fn next_back(&mut self) -> Option<&'static str> {
+        if self.index >= self.length {
+            None
+        } else {
+            self.length -= 1;
+
+            Some(get_audio_driver(self.length))
+        }
+    }
+
+    #[inline]
+    fn nth_back(&mut self, n: usize) -> Option<&'static str> {
+        use std::convert::TryInto;
+
+        self.length = match n.try_into().ok().and_then(|n| self.length.checked_sub(n)) {
+            Some(length) if length > self.index => length,
+            _ => self.index,
+        };
+
+        self.next_back()
     }
 }
 
 impl ExactSizeIterator for DriverIterator {}
+
+impl std::iter::FusedIterator for DriverIterator {}
 
 /// Gets an iterator of all audio drivers compiled into the SDL2 library.
 #[doc(alias = "SDL_GetAudioDriver")]
@@ -683,10 +774,7 @@ impl<'a, Channel: AudioFormatNum> AudioQueue<Channel> {
 
         let mut obtained = MaybeUninit::uninit();
         unsafe {
-            let device = match device.into() {
-                Some(device) => Some(CString::new(device).unwrap()),
-                None => None,
-            };
+            let device = device.into().map(|device| CString::new(device).unwrap());
             // Warning: map_or consumes its argument; `device.map_or()` would therefore consume the
             // CString and drop it, making device_ptr a dangling pointer! To avoid that we downgrade
             // device to an Option<&_> first.
@@ -710,7 +798,7 @@ impl<'a, Channel: AudioFormatNum> AudioQueue<Channel> {
                     Ok(AudioQueue {
                         subsystem: a.clone(),
                         device_id,
-                        phantom: PhantomData::default(),
+                        phantom: PhantomData,
                         spec,
                     })
                 }
@@ -759,7 +847,7 @@ impl<'a, Channel: AudioFormatNum> AudioQueue<Channel> {
             sys::SDL_QueueAudio(
                 self.device_id.id(),
                 data.as_ptr() as *const c_void,
-                (data.len() * mem::size_of::<Channel>()) as u32,
+                mem::size_of_val(data) as u32,
             )
         };
         result == 0
@@ -772,7 +860,7 @@ impl<'a, Channel: AudioFormatNum> AudioQueue<Channel> {
             sys::SDL_QueueAudio(
                 self.device_id.id(),
                 data.as_ptr() as *const c_void,
-                (data.len() * mem::size_of::<Channel>()) as u32,
+                mem::size_of_val(data) as u32,
             )
         };
         if result == 0 {
@@ -827,10 +915,7 @@ impl<CB: AudioCallback> AudioDevice<CB> {
 
         let mut obtained = MaybeUninit::uninit();
         unsafe {
-            let device = match device.into() {
-                Some(device) => Some(CString::new(device).unwrap()),
-                None => None,
-            };
+            let device = device.into().map(|device| CString::new(device).unwrap());
             // Warning: map_or consumes its argument; `device.map_or()` would therefore consume the
             // CString and drop it, making device_ptr a dangling pointer! To avoid that we downgrade
             // device to an Option<&_> first.

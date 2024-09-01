@@ -74,28 +74,28 @@ impl<'a> Deref for Surface<'a> {
 
     #[inline]
     fn deref(&self) -> &SurfaceRef {
-        unsafe { mem::transmute(self.context.raw) }
+        self.as_ref()
     }
 }
 
 impl<'a> DerefMut for Surface<'a> {
     #[inline]
     fn deref_mut(&mut self) -> &mut SurfaceRef {
-        unsafe { mem::transmute(self.context.raw) }
+        self.as_mut()
     }
 }
 
 impl<'a> AsRef<SurfaceRef> for Surface<'a> {
     #[inline]
     fn as_ref(&self) -> &SurfaceRef {
-        unsafe { mem::transmute(self.context.raw) }
+        unsafe { &*(self.context.raw as *const SurfaceRef) }
     }
 }
 
 impl<'a> AsMut<SurfaceRef> for Surface<'a> {
     #[inline]
     fn as_mut(&mut self) -> &mut SurfaceRef {
-        unsafe { mem::transmute(self.context.raw) }
+        unsafe { &mut *(self.context.raw as *mut SurfaceRef) }
     }
 }
 
@@ -125,7 +125,7 @@ impl<'a> Surface<'a> {
         format: pixels::PixelFormatEnum,
     ) -> Result<Surface<'static>, String> {
         let masks = format.into_masks()?;
-        Surface::from_pixelmasks(width, height, masks)
+        Surface::from_pixelmasks(width, height, &masks)
     }
 
     /// Creates a new surface using pixel masks.
@@ -136,13 +136,13 @@ impl<'a> Surface<'a> {
     /// use sdl2::surface::Surface;
     ///
     /// let masks = PixelFormatEnum::RGB24.into_masks().unwrap();
-    /// let surface = Surface::from_pixelmasks(512, 512, masks).unwrap();
+    /// let surface = Surface::from_pixelmasks(512, 512, &masks).unwrap();
     /// ```
     #[doc(alias = "SDL_CreateRGBSurface")]
     pub fn from_pixelmasks(
         width: u32,
         height: u32,
-        masks: pixels::PixelMasks,
+        masks: &pixels::PixelMasks,
     ) -> Result<Surface<'static>, String> {
         unsafe {
             if width >= (1 << 31) || height >= (1 << 31) {
@@ -177,7 +177,7 @@ impl<'a> Surface<'a> {
         format: pixels::PixelFormatEnum,
     ) -> Result<Surface<'a>, String> {
         let masks = format.into_masks()?;
-        Surface::from_data_pixelmasks(data, width, height, pitch, masks)
+        Surface::from_data_pixelmasks(data, width, height, pitch, &masks)
     }
 
     /// Creates a new surface from an existing buffer, using pixel masks.
@@ -187,7 +187,7 @@ impl<'a> Surface<'a> {
         width: u32,
         height: u32,
         pitch: u32,
-        masks: pixels::PixelMasks,
+        masks: &pixels::PixelMasks,
     ) -> Result<Surface<'a>, String> {
         unsafe {
             if width >= (1 << 31) || height >= (1 << 31) {
@@ -196,7 +196,7 @@ impl<'a> Surface<'a> {
                 Err("Pitch is too large.".to_owned())
             } else {
                 let raw = sys::SDL_CreateRGBSurfaceFrom(
-                    data.as_mut_ptr() as *mut _,
+                    data.as_mut_ptr() as *mut libc::c_void,
                     width as c_int,
                     height as c_int,
                     masks.bpp as c_int,
@@ -357,6 +357,7 @@ impl SurfaceRef {
         (self.width(), self.height())
     }
 
+    /// Gets the rect of the surface.
     pub fn rect(&self) -> Rect {
         Rect::new(0, 0, self.width(), self.height())
     }
@@ -377,7 +378,7 @@ impl SurfaceRef {
                 panic!("could not lock surface");
             }
 
-            let raw_pixels = self.raw_ref().pixels as *const _;
+            let raw_pixels = self.raw_ref().pixels as *const u8;
             let len = self.raw_ref().pitch as usize * (self.raw_ref().h as usize);
             let pixels = ::std::slice::from_raw_parts(raw_pixels, len);
             let rv = f(pixels);
@@ -394,7 +395,7 @@ impl SurfaceRef {
                 panic!("could not lock surface");
             }
 
-            let raw_pixels = self.raw_ref().pixels as *mut _;
+            let raw_pixels = self.raw_ref().pixels as *mut u8;
             let len = self.raw_ref().pitch as usize * (self.raw_ref().h as usize);
             let pixels = ::std::slice::from_raw_parts_mut(raw_pixels, len);
             let rv = f(pixels);
@@ -410,7 +411,7 @@ impl SurfaceRef {
             None
         } else {
             unsafe {
-                let raw_pixels = self.raw_ref().pixels as *const _;
+                let raw_pixels = self.raw_ref().pixels as *const u8;
                 let len = self.raw_ref().pitch as usize * (self.raw_ref().h as usize);
 
                 Some(::std::slice::from_raw_parts(raw_pixels, len))
@@ -425,7 +426,7 @@ impl SurfaceRef {
             None
         } else {
             unsafe {
-                let raw_pixels = self.raw_ref().pixels as *mut _;
+                let raw_pixels = self.raw_ref().pixels as *mut u8;
                 let len = self.raw_ref().pitch as usize * (self.raw_ref().h as usize);
 
                 Some(::std::slice::from_raw_parts_mut(raw_pixels, len))
@@ -564,9 +565,7 @@ impl SurfaceRef {
     #[allow(clippy::clone_on_copy)]
     pub fn fill_rects(&mut self, rects: &[Rect], color: pixels::Color) -> Result<(), String> {
         for rect in rects.iter() {
-            if let Err(e) = self.fill_rect(rect.clone(), color) {
-                return Err(e);
-            }
+            self.fill_rect(rect.clone(), color)?
         }
 
         Ok(())
@@ -723,6 +722,7 @@ impl SurfaceRef {
     ///
     /// Unless you know what you're doing, use `blit()` instead, which will clip the input rectangles.
     /// This function could crash if the rectangles aren't pre-clipped to the surface, and is therefore unsafe.
+    #[doc(alias = "SDL_LowerBlit")]
     pub unsafe fn lower_blit<R1, R2>(
         &self,
         src_rect: R1,
@@ -743,6 +743,40 @@ impl SurfaceRef {
             sys::SDL_LowerBlit(self.raw(), src_rect_ptr, dst.raw(), dst_rect_ptr)
         } {
             0 => Ok(()),
+            _ => Err(get_error()),
+        }
+    }
+
+    /// Performs bilinear scaling between two surfaces of the same format, 32BPP.
+    ///
+    /// Returns the final blit rectangle, if a `dst_rect` was provided.
+    #[doc(alias = "SDL_SoftStretchLinear")]
+    pub unsafe fn soft_stretch_linear<R1, R2>(
+        &self,
+        src_rect: R1,
+        dst: &mut SurfaceRef,
+        dst_rect: R2,
+    ) -> Result<Option<Rect>, String>
+    where
+        R1: Into<Option<Rect>>,
+        R2: Into<Option<Rect>>,
+    {
+        let src_rect = src_rect.into();
+        let dst_rect = dst_rect.into();
+
+        match {
+            let src_rect_ptr = src_rect.as_ref().map(|r| r.raw()).unwrap_or(ptr::null());
+
+            // Copy the rect here to make a mutable copy without requiring
+            // a mutable argument
+            let mut dst_rect = dst_rect;
+            let dst_rect_ptr = dst_rect
+                .as_mut()
+                .map(|r| r.raw_mut())
+                .unwrap_or(ptr::null_mut());
+            sys::SDL_SoftStretchLinear(self.raw(), src_rect_ptr, dst.raw(), dst_rect_ptr)
+        } {
+            0 => Ok(dst_rect),
             _ => Err(get_error()),
         }
     }
@@ -785,6 +819,7 @@ impl SurfaceRef {
     ///
     /// Unless you know what you're doing, use `blit_scaled()` instead, which will clip the input rectangles.
     /// This function could crash if the rectangles aren't pre-clipped to the surface, and is therefore unsafe.
+    #[doc(alias = "SDL_LowerBlitScaled")]
     pub unsafe fn lower_blit_scaled<R1, R2>(
         &self,
         src_rect: R1,

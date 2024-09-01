@@ -41,14 +41,10 @@ impl fmt::Display for AddMappingError {
 }
 
 impl error::Error for AddMappingError {
-    fn description(&self) -> &str {
-        use self::AddMappingError::*;
-
-        match *self {
-            InvalidMapping(_) => "invalid mapping",
-            InvalidFilePath(_) => "invalid file path",
-            ReadError(_) => "read error",
-            SdlError(ref e) => e,
+    fn source(&self) -> Option<&(dyn error::Error + 'static)> {
+        match self {
+            Self::InvalidMapping(err) => Some(err),
+            Self::InvalidFilePath(_) | Self::ReadError(_) | Self::SdlError(_) => None,
         }
     }
 }
@@ -126,9 +122,7 @@ impl GameControllerSubsystem {
     /// Return `true` if controller events are processed.
     #[doc(alias = "SDL_GameControllerEventState")]
     pub fn event_state(&self) -> bool {
-        unsafe {
-            sys::SDL_GameControllerEventState(sys::SDL_QUERY as i32) == sys::SDL_ENABLE as i32
-        }
+        unsafe { sys::SDL_GameControllerEventState(sys::SDL_QUERY) == sys::SDL_ENABLE as i32 }
     }
 
     /// Add a new controller input mapping from a mapping string.
@@ -172,7 +166,7 @@ impl GameControllerSubsystem {
 
     /// Load controller input mappings from an SDL [`RWops`] object.
     #[doc(alias = "SDL_GameControllerAddMappingsFromRW")]
-    pub fn load_mappings_from_rw<'a>(&self, rw: RWops<'a>) -> Result<i32, AddMappingError> {
+    pub fn load_mappings_from_rw(&self, rw: RWops<'_>) -> Result<i32, AddMappingError> {
         use self::AddMappingError::*;
 
         let result = unsafe { sys::SDL_GameControllerAddMappingsFromRW(rw.raw(), 0) };
@@ -442,6 +436,30 @@ impl GameController {
         }
     }
 
+    /// Return the USB vendor ID of an opened controller, if available.
+    #[doc(alias = "SDL_GameControllerGetVendor")]
+    pub fn vendor_id(&self) -> Option<u16> {
+        let result = unsafe { sys::SDL_GameControllerGetVendor(self.raw) };
+
+        if result == 0 {
+            None
+        } else {
+            Some(result)
+        }
+    }
+
+    /// Return the USB product ID of an opened controller, if available.
+    #[doc(alias = "SDL_GameControllerGetProduct")]
+    pub fn product_id(&self) -> Option<u16> {
+        let result = unsafe { sys::SDL_GameControllerGetProduct(self.raw) };
+
+        if result == 0 {
+            None
+        } else {
+            Some(result)
+        }
+    }
+
     /// Get the position of the given `axis`
     #[doc(alias = "SDL_GameControllerGetAxis")]
     pub fn axis(&self, axis: Axis) -> i16 {
@@ -507,6 +525,88 @@ impl GameController {
             Ok(())
         }
     }
+
+    /// Start a rumble effect in the game controller's triggers.
+    #[doc(alias = "SDL_GameControllerRumbleTriggers")]
+    pub fn set_rumble_triggers(
+        &mut self,
+        left_rumble: u16,
+        right_rumble: u16,
+        duration_ms: u32,
+    ) -> Result<(), IntegerOrSdlError> {
+        let result = unsafe {
+            sys::SDL_GameControllerRumbleTriggers(self.raw, left_rumble, right_rumble, duration_ms)
+        };
+
+        if result != 0 {
+            Err(IntegerOrSdlError::SdlError(get_error()))
+        } else {
+            Ok(())
+        }
+    }
+
+    /// Query whether a game controller has an LED.
+    #[doc(alias = "SDL_GameControllerHasLED")]
+    pub fn has_led(&self) -> bool {
+        let result = unsafe { sys::SDL_GameControllerHasLED(self.raw) };
+
+        match result {
+            sys::SDL_bool::SDL_FALSE => false,
+            sys::SDL_bool::SDL_TRUE => true,
+        }
+    }
+
+    /// Query whether a game controller has rumble support.
+    #[doc(alias = "SDL_GameControllerHasRumble")]
+    pub fn has_rumble(&self) -> bool {
+        let result = unsafe { sys::SDL_GameControllerHasRumble(self.raw) };
+
+        match result {
+            sys::SDL_bool::SDL_FALSE => false,
+            sys::SDL_bool::SDL_TRUE => true,
+        }
+    }
+
+    /// Query whether a game controller has rumble support on triggers.
+    #[doc(alias = "SDL_GameControllerHasRumbleTriggers")]
+    pub fn has_rumble_triggers(&self) -> bool {
+        let result = unsafe { sys::SDL_GameControllerHasRumbleTriggers(self.raw) };
+
+        match result {
+            sys::SDL_bool::SDL_FALSE => false,
+            sys::SDL_bool::SDL_TRUE => true,
+        }
+    }
+
+    /// Update a game controller's LED color.
+    #[doc(alias = "SDL_GameControllerSetLED")]
+    pub fn set_led(&mut self, red: u8, green: u8, blue: u8) -> Result<(), IntegerOrSdlError> {
+        let result = unsafe { sys::SDL_GameControllerSetLED(self.raw, red, green, blue) };
+
+        if result != 0 {
+            Err(IntegerOrSdlError::SdlError(get_error()))
+        } else {
+            Ok(())
+        }
+    }
+
+    /// Send a controller specific effect packet.
+    #[doc(alias = "SDL_GameControllerSendEffect")]
+    pub fn send_effect(&mut self, data: &[u8]) -> Result<(), String> {
+        let result = unsafe {
+            sys::SDL_GameControllerSendEffect(
+                self.raw,
+                data.as_ptr() as *const libc::c_void,
+                data.len() as i32,
+            )
+        };
+
+        if result != 0 {
+            Err(get_error())
+        } else {
+            Ok(())
+        }
+    }
 }
 
 #[cfg(feature = "hidapi")]
@@ -532,7 +632,7 @@ impl GameController {
         }
     }
 
-    #[doc(alias = "SDL_GameControllerHasSensor")]
+    #[doc(alias = "SDL_GameControllerSetSensorEnabled")]
     pub fn sensor_set_enabled(
         &self,
         sensor_type: crate::sensor::SensorType,
@@ -555,6 +655,12 @@ impl GameController {
         } else {
             Ok(())
         }
+    }
+
+    /// Get the data rate (number of events per second) of a game controller sensor.
+    #[doc(alias = "SDL_GameControllerGetSensorDataRate")]
+    pub fn sensor_get_data_rate(&self, sensor_type: SensorType) -> f32 {
+        unsafe { sys::SDL_GameControllerGetSensorDataRate(self.raw, sensor_type.into()) }
     }
 
     /// Get data from a sensor.

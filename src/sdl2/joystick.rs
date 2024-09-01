@@ -87,7 +87,7 @@ impl JoystickSubsystem {
     /// Return `true` if joystick events are processed.
     #[doc(alias = "SDL_JoystickEventState")]
     pub fn event_state(&self) -> bool {
-        unsafe { sys::SDL_JoystickEventState(sys::SDL_QUERY as i32) == sys::SDL_ENABLE as i32 }
+        unsafe { sys::SDL_JoystickEventState(sys::SDL_QUERY) == sys::SDL_ENABLE as i32 }
     }
 
     /// Force joystick update when not using the event loop
@@ -118,7 +118,7 @@ impl PowerLevel {
             SDL_JoystickPowerLevel::SDL_JOYSTICK_POWER_MEDIUM => PowerLevel::Medium,
             SDL_JoystickPowerLevel::SDL_JOYSTICK_POWER_FULL => PowerLevel::Full,
             SDL_JoystickPowerLevel::SDL_JOYSTICK_POWER_WIRED => PowerLevel::Wired,
-            _ => panic!("Unexpected power level: {:?}", raw),
+            _ => panic!("Unexpected power level: {}", raw as i32),
         }
     }
 
@@ -391,6 +391,88 @@ impl Joystick {
                 low_frequency_rumble,
                 high_frequency_rumble,
                 duration_ms,
+            )
+        };
+
+        if result != 0 {
+            Err(IntegerOrSdlError::SdlError(get_error()))
+        } else {
+            Ok(())
+        }
+    }
+
+    /// Start a rumble effect in the joystick's triggers.
+    #[doc(alias = "SDL_JoystickRumbleTriggers")]
+    pub fn set_rumble_triggers(
+        &mut self,
+        left_rumble: u16,
+        right_rumble: u16,
+        duration_ms: u32,
+    ) -> Result<(), IntegerOrSdlError> {
+        let result = unsafe {
+            sys::SDL_JoystickRumbleTriggers(self.raw, left_rumble, right_rumble, duration_ms)
+        };
+
+        if result != 0 {
+            Err(IntegerOrSdlError::SdlError(get_error()))
+        } else {
+            Ok(())
+        }
+    }
+
+    /// Query whether a joystick has an LED.
+    #[doc(alias = "SDL_JoystickHasLED")]
+    pub fn has_led(&self) -> bool {
+        let result = unsafe { sys::SDL_JoystickHasLED(self.raw) };
+
+        match result {
+            sys::SDL_bool::SDL_FALSE => false,
+            sys::SDL_bool::SDL_TRUE => true,
+        }
+    }
+
+    /// Query whether a joystick has rumble support.
+    #[doc(alias = "SDL_JoystickHasRumble")]
+    pub fn has_rumble(&self) -> bool {
+        let result = unsafe { sys::SDL_JoystickHasRumble(self.raw) };
+
+        match result {
+            sys::SDL_bool::SDL_FALSE => false,
+            sys::SDL_bool::SDL_TRUE => true,
+        }
+    }
+
+    /// Query whether a joystick has rumble support on triggers.
+    #[doc(alias = "SDL_JoystickHasRumbleTriggers")]
+    pub fn has_rumble_triggers(&self) -> bool {
+        let result = unsafe { sys::SDL_JoystickHasRumbleTriggers(self.raw) };
+
+        match result {
+            sys::SDL_bool::SDL_FALSE => false,
+            sys::SDL_bool::SDL_TRUE => true,
+        }
+    }
+
+    /// Update a joystick's LED color.
+    #[doc(alias = "SDL_JoystickSetLED")]
+    pub fn set_led(&mut self, red: u8, green: u8, blue: u8) -> Result<(), IntegerOrSdlError> {
+        let result = unsafe { sys::SDL_JoystickSetLED(self.raw, red, green, blue) };
+
+        if result != 0 {
+            Err(IntegerOrSdlError::SdlError(get_error()))
+        } else {
+            Ok(())
+        }
+    }
+
+    /// Send a joystick specific effect packet.
+    #[doc(alias = "SDL_JoystickSendEffect")]
+    pub fn send_effect(&mut self, data: &[u8]) -> Result<(), IntegerOrSdlError> {
+        let result = unsafe {
+            sys::SDL_JoystickSendEffect(
+                self.raw,
+                data.as_ptr() as *const libc::c_void,
+                data.len() as i32,
             )
         };
 

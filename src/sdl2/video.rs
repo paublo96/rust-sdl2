@@ -34,7 +34,7 @@ impl<'a> Deref for WindowSurfaceRef<'a> {
 impl<'a> DerefMut for WindowSurfaceRef<'a> {
     #[inline]
     fn deref_mut(&mut self) -> &mut SurfaceRef {
-        &mut self.0
+        self.0
     }
 }
 
@@ -463,10 +463,10 @@ impl DisplayMode {
 
     pub fn from_ll(raw: &sys::SDL_DisplayMode) -> DisplayMode {
         DisplayMode::new(
-            PixelFormatEnum::try_from(raw.format as u32).unwrap_or(PixelFormatEnum::Unknown),
-            raw.w as i32,
-            raw.h as i32,
-            raw.refresh_rate as i32,
+            PixelFormatEnum::try_from(raw.format).unwrap_or(PixelFormatEnum::Unknown),
+            raw.w,
+            raw.h,
+            raw.refresh_rate,
         )
     }
 
@@ -547,23 +547,38 @@ impl GLContext {
 pub struct WindowContext {
     subsystem: VideoSubsystem,
     raw: *mut sys::SDL_Window,
+    #[allow(dead_code)]
+    pub(crate) metal_view: sys::SDL_MetalView,
 }
 
 impl Drop for WindowContext {
     #[inline]
     #[doc(alias = "SDL_DestroyWindow")]
     fn drop(&mut self) {
-        unsafe { sys::SDL_DestroyWindow(self.raw) };
+        unsafe {
+            #[cfg(target_os = "macos")]
+            if !self.metal_view.is_null() {
+                sys::SDL_Metal_DestroyView(self.metal_view);
+            }
+            sys::SDL_DestroyWindow(self.raw)
+        };
     }
 }
 
 impl WindowContext {
     #[inline]
-    /// Unsafe if the `*mut SDL_Window` is used after the `WindowContext` is dropped
-    pub unsafe fn from_ll(subsystem: VideoSubsystem, raw: *mut sys::SDL_Window) -> WindowContext {
+    /// # Safety
+    ///
+    /// Unsound if the `*mut SDL_Window` is used after the `WindowContext` is dropped
+    pub unsafe fn from_ll(
+        subsystem: VideoSubsystem,
+        raw: *mut sys::SDL_Window,
+        metal_view: sys::SDL_MetalView,
+    ) -> WindowContext {
         WindowContext {
             subsystem: subsystem.clone(),
             raw,
+            metal_view,
         }
     }
 }
@@ -637,6 +652,36 @@ impl Orientation {
     }
 }
 
+/// Represents a setting for a window flash operation.
+#[derive(Copy, Clone, PartialEq, Eq, Hash, Debug)]
+#[repr(i32)]
+pub enum FlashOperation {
+    /// Cancel any window flash state
+    Cancel = sys::SDL_FlashOperation::SDL_FLASH_CANCEL as i32,
+    /// Flash the window briefly to get attention
+    Briefly = sys::SDL_FlashOperation::SDL_FLASH_BRIEFLY as i32,
+    /// Flash the window until it gets focus
+    UntilFocused = sys::SDL_FlashOperation::SDL_FLASH_UNTIL_FOCUSED as i32,
+}
+
+impl FlashOperation {
+    pub fn from_ll(flash_operation: sys::SDL_FlashOperation) -> FlashOperation {
+        match flash_operation {
+            sys::SDL_FlashOperation::SDL_FLASH_CANCEL => FlashOperation::Cancel,
+            sys::SDL_FlashOperation::SDL_FLASH_BRIEFLY => FlashOperation::Briefly,
+            sys::SDL_FlashOperation::SDL_FLASH_UNTIL_FOCUSED => FlashOperation::UntilFocused,
+        }
+    }
+
+    pub fn to_ll(self) -> sys::SDL_FlashOperation {
+        match self {
+            FlashOperation::Cancel => sys::SDL_FlashOperation::SDL_FLASH_CANCEL,
+            FlashOperation::Briefly => sys::SDL_FlashOperation::SDL_FLASH_BRIEFLY,
+            FlashOperation::UntilFocused => sys::SDL_FlashOperation::SDL_FLASH_UNTIL_FOCUSED,
+        }
+    }
+}
+
 /// Represents the "shell" of a `Window`.
 ///
 /// You can set get and set many of the `SDL_Window` properties (i.e., border, size, `PixelFormat`, etc)
@@ -647,6 +692,7 @@ impl Orientation {
 /// Note: If a `Window` goes out of scope but it cloned its context,
 /// then the `SDL_Window` will not be destroyed until there are no more references to the `WindowContext`.
 /// This may happen when a `TextureCreator<Window>` outlives the `Canvas<Window>`
+#[derive(Clone)]
 pub struct Window {
     context: Rc<WindowContext>,
 }
@@ -1047,14 +1093,10 @@ impl fmt::Display for WindowBuildError {
 }
 
 impl Error for WindowBuildError {
-    fn description(&self) -> &str {
-        use self::WindowBuildError::*;
-
-        match *self {
-            HeightOverflows(_) => "window height overflow",
-            WidthOverflows(_) => "window width overflow",
-            InvalidTitle(_) => "invalid window title",
-            SdlError(ref e) => e,
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::InvalidTitle(err) => Some(err),
+            Self::HeightOverflows(_) | Self::WidthOverflows(_) | Self::SdlError(_) => None,
         }
     }
 }
@@ -1068,9 +1110,11 @@ pub struct WindowBuilder {
     x: WindowPos,
     y: WindowPos,
     window_flags: u32,
+    create_metal_view: bool,
     /// The window builder cannot be built on a non-main thread, so prevent cross-threaded moves and references.
     /// `!Send` and `!Sync`,
     subsystem: VideoSubsystem,
+    shaped: bool,
 }
 
 impl WindowBuilder {
@@ -1084,6 +1128,8 @@ impl WindowBuilder {
             y: WindowPos::Undefined,
             window_flags: 0,
             subsystem: v.clone(),
+            create_metal_view: false,
+            shaped: false,
         }
     }
 
@@ -1091,7 +1137,7 @@ impl WindowBuilder {
     #[doc(alias = "SDL_CreateWindow")]
     pub fn build(&self) -> Result<Window, WindowBuildError> {
         use self::WindowBuildError::*;
-        let title = match CString::new(self.title.clone()) {
+        let title = match CString::new(self.title.as_bytes()) {
             Ok(t) => t,
             Err(err) => return Err(InvalidTitle(err)),
         };
@@ -1105,19 +1151,36 @@ impl WindowBuilder {
         let raw_width = self.width as c_int;
         let raw_height = self.height as c_int;
         unsafe {
-            let raw = sys::SDL_CreateWindow(
-                title.as_ptr() as *const c_char,
-                to_ll_windowpos(self.x),
-                to_ll_windowpos(self.y),
-                raw_width,
-                raw_height,
-                self.window_flags,
-            );
+            let raw = if self.shaped {
+                sys::SDL_CreateShapedWindow(
+                    title.as_ptr() as *const c_char,
+                    to_ll_windowpos(self.x) as u32,
+                    to_ll_windowpos(self.y) as u32,
+                    raw_width as u32,
+                    raw_height as u32,
+                    self.window_flags,
+                )
+            } else {
+                sys::SDL_CreateWindow(
+                    title.as_ptr() as *const c_char,
+                    to_ll_windowpos(self.x),
+                    to_ll_windowpos(self.y),
+                    raw_width,
+                    raw_height,
+                    self.window_flags,
+                )
+            };
 
             if raw.is_null() {
                 Err(SdlError(get_error()))
             } else {
-                Ok(Window::from_ll(self.subsystem.clone(), raw))
+                let metal_view = match self.create_metal_view {
+                    #[cfg(target_os = "macos")]
+                    true => sys::SDL_Metal_CreateView(raw),
+                    _ => 0 as sys::SDL_MetalView,
+                };
+
+                Ok(Window::from_ll(self.subsystem.clone(), raw, metal_view))
             }
         }
     }
@@ -1213,6 +1276,26 @@ impl WindowBuilder {
         self.window_flags |= sys::SDL_WindowFlags::SDL_WINDOW_ALLOW_HIGHDPI as u32;
         self
     }
+
+    /// Window should always above others (>= SDL 2.0.5)
+    pub fn always_on_top(&mut self) -> &mut WindowBuilder {
+        self.window_flags |= sys::SDL_WindowFlags::SDL_WINDOW_ALWAYS_ON_TOP as u32;
+        self
+    }
+
+    /// Create a SDL_MetalView when constructing the window.
+    /// This is required when using the raw_window_handle feature on MacOS.
+    /// Has no effect no other platforms.
+    pub fn metal_view(&mut self) -> &mut WindowBuilder {
+        self.create_metal_view = true;
+        self
+    }
+
+    /// Sets shaped state, to create via SDL_CreateShapedWindow instead of SDL_CreateWindow
+    pub fn set_shaped(&mut self) -> &mut WindowBuilder {
+        self.shaped = true;
+        self
+    }
 }
 
 impl From<Window> for CanvasBuilder {
@@ -1231,14 +1314,18 @@ impl Window {
     }
 
     #[inline]
-    pub unsafe fn from_ll(subsystem: VideoSubsystem, raw: *mut sys::SDL_Window) -> Window {
-        let context = WindowContext::from_ll(subsystem, raw);
+    pub unsafe fn from_ll(
+        subsystem: VideoSubsystem,
+        raw: *mut sys::SDL_Window,
+        metal_view: sys::SDL_MetalView,
+    ) -> Window {
+        let context = WindowContext::from_ll(subsystem, raw, metal_view);
         context.into()
     }
 
     #[inline]
     /// Create a new `Window` without taking ownership of the `WindowContext`
-    pub const unsafe fn from_ref(context: Rc<WindowContext>) -> Window {
+    pub const fn from_ref(context: Rc<WindowContext>) -> Window {
         Window { context }
     }
 
@@ -1399,6 +1486,21 @@ impl Window {
         }
     }
 
+    #[doc(alias = "SDL_GetWindowICCProfile")]
+    pub fn icc_profile(&self) -> Result<Vec<u8>, String> {
+        unsafe {
+            let mut size: libc::size_t = 0;
+            let data = sys::SDL_GetWindowICCProfile(self.context.raw, &mut size as *mut _);
+            if data.is_null() {
+                return Err(get_error());
+            }
+            let mut result = vec![0; size as usize];
+            result.copy_from_slice(std::slice::from_raw_parts(data as *const u8, size as usize));
+            sys::SDL_free(data);
+            Ok(result)
+        }
+    }
+
     #[doc(alias = "SDL_GetWindowPixelFormat")]
     pub fn window_pixel_format(&self) -> PixelFormatEnum {
         unsafe {
@@ -1412,6 +1514,36 @@ impl Window {
         unsafe { sys::SDL_GetWindowFlags(self.context.raw) }
     }
 
+    /// Does the window have input focus?
+    pub fn has_input_focus(&self) -> bool {
+        0 != self.window_flags() & sys::SDL_WindowFlags::SDL_WINDOW_INPUT_FOCUS as u32
+    }
+
+    /// Has the window grabbed input focus?
+    pub fn has_input_grabbed(&self) -> bool {
+        0 != self.window_flags() & sys::SDL_WindowFlags::SDL_WINDOW_INPUT_GRABBED as u32
+    }
+
+    /// Does the window have mouse focus?
+    pub fn has_mouse_focus(&self) -> bool {
+        0 != self.window_flags() & sys::SDL_WindowFlags::SDL_WINDOW_MOUSE_FOCUS as u32
+    }
+
+    /// Is the window maximized?
+    pub fn is_maximized(&self) -> bool {
+        0 != self.window_flags() & sys::SDL_WindowFlags::SDL_WINDOW_MAXIMIZED as u32
+    }
+
+    /// Is the window minimized?
+    pub fn is_minimized(&self) -> bool {
+        0 != self.window_flags() & sys::SDL_WindowFlags::SDL_WINDOW_MINIMIZED as u32
+    }
+
+    /// Is the window always on top?
+    pub fn is_always_on_top(&self) -> bool {
+        0 != self.window_flags() & sys::SDL_WindowFlags::SDL_WINDOW_ALWAYS_ON_TOP as u32
+    }
+
     #[doc(alias = "SDL_SetWindowTitle")]
     pub fn set_title(&mut self, title: &str) -> Result<(), NulError> {
         let title = CString::new(title)?;
@@ -1419,6 +1551,44 @@ impl Window {
             sys::SDL_SetWindowTitle(self.context.raw, title.as_ptr() as *const c_char);
         }
         Ok(())
+    }
+
+    #[doc(alias = "SDL_SetWindowResizable")]
+    pub fn set_resizable(&mut self, resizable: bool) {
+        let resizable = if resizable {
+            sys::SDL_bool::SDL_TRUE
+        } else {
+            sys::SDL_bool::SDL_FALSE
+        };
+        unsafe {
+            sys::SDL_SetWindowResizable(self.context.raw, resizable);
+        }
+    }
+
+    /// Set the shape of the window
+    /// To be effective:
+    /// - shaped must have been set using windows builder
+    /// - binarizationCutoff: specify the cutoff value for the shape's alpha
+    ///   channel: At or above that cutoff value, a pixel is visible in the
+    ///   shape. Below that, it's not part of the shape.
+    pub fn set_window_shape_alpha<S: AsRef<SurfaceRef>>(
+        &mut self,
+        shape: S,
+        binarization_cutoff: u8,
+    ) -> Result<(), i32> {
+        let mode = sys::WindowShapeMode::ShapeModeBinarizeAlpha;
+        let parameters = sys::SDL_WindowShapeParams {
+            binarizationCutoff: binarization_cutoff,
+        };
+        let mut shape_mode = sys::SDL_WindowShapeMode { mode, parameters };
+        let result = unsafe {
+            sys::SDL_SetWindowShape(self.context.raw, shape.as_ref().raw(), &mut shape_mode)
+        };
+        if result == 0 {
+            Ok(())
+        } else {
+            Err(result)
+        }
     }
 
     #[doc(alias = "SDL_GetWindowTitle")]
@@ -1658,9 +1828,84 @@ impl Window {
         }
     }
 
+    #[doc(alias = "SDL_SetWindowKeyboardGrab")]
+    pub fn set_keyboard_grab(&mut self, grabbed: bool) {
+        unsafe {
+            sys::SDL_SetWindowKeyboardGrab(
+                self.context.raw,
+                if grabbed {
+                    sys::SDL_bool::SDL_TRUE
+                } else {
+                    sys::SDL_bool::SDL_FALSE
+                },
+            )
+        }
+    }
+
+    #[doc(alias = "SDL_SetWindowMouseGrab")]
+    pub fn set_mouse_grab(&mut self, grabbed: bool) {
+        unsafe {
+            sys::SDL_SetWindowMouseGrab(
+                self.context.raw,
+                if grabbed {
+                    sys::SDL_bool::SDL_TRUE
+                } else {
+                    sys::SDL_bool::SDL_FALSE
+                },
+            )
+        }
+    }
+
     #[doc(alias = "SDL_GetWindowGrab")]
     pub fn grab(&self) -> bool {
         unsafe { sys::SDL_GetWindowGrab(self.context.raw) == sys::SDL_bool::SDL_TRUE }
+    }
+
+    #[doc(alias = "SDL_GetWindowKeyboardGrab")]
+    pub fn keyboard_grab(&self) -> bool {
+        unsafe { sys::SDL_GetWindowKeyboardGrab(self.context.raw) == sys::SDL_bool::SDL_TRUE }
+    }
+
+    #[doc(alias = "SDL_GetWindowMouseGrab")]
+    pub fn mouse_grab(&self) -> bool {
+        unsafe { sys::SDL_GetWindowMouseGrab(self.context.raw) == sys::SDL_bool::SDL_TRUE }
+    }
+
+    #[doc(alias = "SDL_SetWindowMouseRect")]
+    pub fn set_mouse_rect<R>(&self, rect: R) -> Result<(), String>
+    where
+        R: Into<Option<Rect>>,
+    {
+        let rect = rect.into();
+        let rect_raw_ptr = match rect {
+            Some(ref rect) => rect.raw(),
+            None => ptr::null(),
+        };
+
+        unsafe {
+            if sys::SDL_SetWindowMouseRect(self.context.raw, rect_raw_ptr) == 0 {
+                Ok(())
+            } else {
+                Err(get_error())
+            }
+        }
+    }
+
+    #[doc(alias = "SDL_GetWindowMouseRect")]
+    pub fn mouse_rect(&self) -> Option<Rect> {
+        unsafe {
+            let raw_rect = sys::SDL_GetWindowMouseRect(self.context.raw);
+            if raw_rect.is_null() {
+                None
+            } else {
+                Some(Rect::new(
+                    (*raw_rect).x,
+                    (*raw_rect).y,
+                    (*raw_rect).w as u32,
+                    (*raw_rect).h as u32,
+                ))
+            }
+        }
     }
 
     #[doc(alias = "SDL_SetWindowBrightness")]
@@ -1768,6 +2013,32 @@ impl Window {
             Ok(opacity)
         }
     }
+
+    /// Requests a window to demand attention from the user.
+    #[doc(alias = "SDL_FlashWindow")]
+    pub fn flash(&mut self, operation: FlashOperation) -> Result<(), String> {
+        let result = unsafe { sys::SDL_FlashWindow(self.context.raw, operation.to_ll()) };
+        if result == 0 {
+            Ok(())
+        } else {
+            Err(get_error())
+        }
+    }
+
+    /// Makes window appear on top of others
+    #[doc(alias = "SDL_SetWindowAlwaysOnTop")]
+    pub fn set_always_on_top(&mut self, on_top: bool) {
+        unsafe {
+            sys::SDL_SetWindowAlwaysOnTop(
+                self.context.raw,
+                if on_top {
+                    sys::SDL_bool::SDL_TRUE
+                } else {
+                    sys::SDL_bool::SDL_FALSE
+                },
+            )
+        };
+    }
 }
 
 #[derive(Copy, Clone)]
@@ -1775,6 +2046,20 @@ impl Window {
 pub struct DriverIterator {
     length: i32,
     index: i32,
+}
+
+// panics if SDL_GetVideoDriver returns a null pointer,
+// which only happens if index is outside the range
+// 0..SDL_GetNumVideoDrivers()
+fn get_video_driver(index: i32) -> &'static str {
+    use std::str;
+
+    unsafe {
+        let buf = sys::SDL_GetVideoDriver(index);
+        assert!(!buf.is_null());
+
+        str::from_utf8(CStr::from_ptr(buf as *const _).to_bytes()).unwrap()
+    }
 }
 
 impl Iterator for DriverIterator {
@@ -1785,26 +2070,60 @@ impl Iterator for DriverIterator {
         if self.index >= self.length {
             None
         } else {
-            use std::str;
+            let driver = get_video_driver(self.index);
+            self.index += 1;
 
-            unsafe {
-                let buf = sys::SDL_GetVideoDriver(self.index);
-                assert!(!buf.is_null());
-                self.index += 1;
-
-                Some(str::from_utf8(CStr::from_ptr(buf as *const _).to_bytes()).unwrap())
-            }
+            Some(driver)
         }
     }
 
     #[inline]
     fn size_hint(&self) -> (usize, Option<usize>) {
-        let l = self.length as usize;
-        (l, Some(l))
+        let remaining = (self.length - self.index) as usize;
+        (remaining, Some(remaining))
+    }
+
+    #[inline]
+    fn nth(&mut self, n: usize) -> Option<&'static str> {
+        use std::convert::TryInto;
+
+        self.index = match n.try_into().ok().and_then(|n| self.index.checked_add(n)) {
+            Some(index) if index < self.length => index,
+            _ => self.length,
+        };
+
+        self.next()
+    }
+}
+
+impl DoubleEndedIterator for DriverIterator {
+    #[inline]
+    fn next_back(&mut self) -> Option<&'static str> {
+        if self.index >= self.length {
+            None
+        } else {
+            self.length -= 1;
+
+            Some(get_video_driver(self.length))
+        }
+    }
+
+    #[inline]
+    fn nth_back(&mut self, n: usize) -> Option<&'static str> {
+        use std::convert::TryInto;
+
+        self.length = match n.try_into().ok().and_then(|n| self.length.checked_sub(n)) {
+            Some(length) if length > self.index => length,
+            _ => self.index,
+        };
+
+        self.next_back()
     }
 }
 
 impl ExactSizeIterator for DriverIterator {}
+
+impl std::iter::FusedIterator for DriverIterator {}
 
 /// Gets an iterator of all video drivers compiled into the SDL2 library.
 #[inline]

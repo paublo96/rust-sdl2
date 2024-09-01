@@ -10,7 +10,9 @@ pub struct Palette {
 
 impl Palette {
     #[inline]
-    /// Creates a new, uninitialized palette
+    /// Create a palette structure with the specified number of color entries.
+    ///
+    /// The palette entries are initialized to white.
     #[doc(alias = "SDL_AllocPalette")]
     pub fn new(mut capacity: usize) -> Result<Self, String> {
         use crate::common::*;
@@ -19,7 +21,7 @@ impl Palette {
             // This is kind of a hack. We have to cast twice because
             // ncolors is a c_int, and validate_int only takes a u32.
             // FIXME: Modify validate_int to make this unnecessary
-            let u32_max = u32::max_value() as usize;
+            let u32_max = u32::MAX as usize;
             if capacity > u32_max {
                 capacity = u32_max;
             }
@@ -47,14 +49,9 @@ impl Palette {
         // Already validated, so don't check again
         let ncolors = colors.len() as ::libc::c_int;
 
-        let result = unsafe {
-            let mut raw_colors: Vec<sys::SDL_Color> =
-                colors.iter().map(|color| color.raw()).collect();
+        let colors = colors.iter().map(|color| color.raw()).collect::<Vec<_>>();
 
-            let pal_ptr = (&mut raw_colors[0]) as *mut sys::SDL_Color;
-
-            sys::SDL_SetPaletteColors(pal.raw, pal_ptr, 0, ncolors)
-        };
+        let result = unsafe { sys::SDL_SetPaletteColors(pal.raw, colors.as_ptr(), 0, ncolors) };
 
         if result < 0 {
             Err(get_error())
@@ -163,9 +160,9 @@ impl Color {
     pub const CYAN: Color = Color::RGBA(0, 255, 255, 255);
 }
 
-impl Into<sys::SDL_Color> for Color {
-    fn into(self) -> sys::SDL_Color {
-        self.raw()
+impl From<Color> for sys::SDL_Color {
+    fn from(val: Color) -> Self {
+        val.raw()
     }
 }
 
@@ -246,6 +243,8 @@ pub enum PixelFormatEnum {
     YUY2 = sys::SDL_PixelFormatEnum::SDL_PIXELFORMAT_YUY2 as i32,
     UYVY = sys::SDL_PixelFormatEnum::SDL_PIXELFORMAT_UYVY as i32,
     YVYU = sys::SDL_PixelFormatEnum::SDL_PIXELFORMAT_YVYU as i32,
+    NV12 = sys::SDL_PixelFormatEnum::SDL_PIXELFORMAT_NV12 as i32,
+    NV21 = sys::SDL_PixelFormatEnum::SDL_PIXELFORMAT_NV21 as i32,
 }
 
 // Endianness-agnostic aliases for 32-bit formats
@@ -318,6 +317,13 @@ impl PixelFormatEnum {
                 // U and V have half the width and height of Y.
                 pitch * height + 2 * (pitch / 2 * height / 2)
             }
+            PixelFormatEnum::NV12 | PixelFormatEnum::NV21 => {
+                // NV12 is 4:2:0.
+                // `pitch` is the width of the Y component, and
+                // `height` is the height of the Y component.
+                // U and V have half the width and height of Y.
+                pitch * height + 2 * (pitch / 2 * height / 2)
+            }
             _ => pitch * height,
         }
     }
@@ -350,11 +356,13 @@ impl PixelFormatEnum {
             | PixelFormatEnum::BGRA8888
             | PixelFormatEnum::ARGB2101010 => num_of_pixels * 4,
             // YUV formats
-            // FIXME: rounding error here?
+            // rounding error handled by image size constraints
             PixelFormatEnum::YV12 | PixelFormatEnum::IYUV => num_of_pixels / 2 * 3,
             PixelFormatEnum::YUY2 | PixelFormatEnum::UYVY | PixelFormatEnum::YVYU => {
                 num_of_pixels * 2
             }
+            // rounding error handled by image size constraints
+            PixelFormatEnum::NV12 | PixelFormatEnum::NV21 => num_of_pixels / 2 * 3,
             // Unsupported formats
             PixelFormatEnum::Index8 => num_of_pixels,
             PixelFormatEnum::Unknown
@@ -393,8 +401,9 @@ impl PixelFormatEnum {
             | PixelFormatEnum::BGRA8888
             | PixelFormatEnum::ARGB2101010 => 4,
             // YUV formats
-            PixelFormatEnum::YV12 | PixelFormatEnum::IYUV => 2,
+            PixelFormatEnum::YV12 | PixelFormatEnum::IYUV => 1,
             PixelFormatEnum::YUY2 | PixelFormatEnum::UYVY | PixelFormatEnum::YVYU => 2,
+            PixelFormatEnum::NV12 | PixelFormatEnum::NV21 => 1,
             // Unsupported formats
             PixelFormatEnum::Index8 => 1,
             PixelFormatEnum::Unknown
@@ -407,11 +416,22 @@ impl PixelFormatEnum {
 
     pub fn supports_alpha(self) -> bool {
         use crate::pixels::PixelFormatEnum::*;
-        match self {
-            ARGB4444 | ARGB1555 | ARGB8888 | ARGB2101010 | ABGR4444 | ABGR1555 | ABGR8888
-            | BGRA4444 | BGRA5551 | BGRA8888 | RGBA4444 | RGBA5551 | RGBA8888 => true,
-            _ => false,
-        }
+        matches!(
+            self,
+            ARGB4444
+                | ARGB1555
+                | ARGB8888
+                | ARGB2101010
+                | ABGR4444
+                | ABGR1555
+                | ABGR8888
+                | BGRA4444
+                | BGRA5551
+                | BGRA8888
+                | RGBA4444
+                | RGBA5551
+                | RGBA8888
+        )
     }
 }
 
@@ -419,7 +439,7 @@ impl From<PixelFormat> for PixelFormatEnum {
     fn from(pf: PixelFormat) -> PixelFormatEnum {
         unsafe {
             let sdl_pf = *pf.raw;
-            match PixelFormatEnum::try_from(sdl_pf.format as u32) {
+            match PixelFormatEnum::try_from(sdl_pf.format) {
                 Ok(pfe) => pfe,
                 Err(()) => panic!("Unknown pixel format: {:?}", sdl_pf.format),
             }
@@ -470,6 +490,8 @@ impl TryFrom<u32> for PixelFormatEnum {
             sys::SDL_PixelFormatEnum::SDL_PIXELFORMAT_YUY2 => YUY2,
             sys::SDL_PixelFormatEnum::SDL_PIXELFORMAT_UYVY => UYVY,
             sys::SDL_PixelFormatEnum::SDL_PIXELFORMAT_YVYU => YVYU,
+            sys::SDL_PixelFormatEnum::SDL_PIXELFORMAT_NV12 => NV12,
+            sys::SDL_PixelFormatEnum::SDL_PIXELFORMAT_NV21 => NV21,
             _ => return Err(()),
         })
     }
@@ -526,6 +548,8 @@ fn test_pixel_format_enum() {
         PixelFormatEnum::YUY2,
         PixelFormatEnum::UYVY,
         PixelFormatEnum::YVYU,
+        PixelFormatEnum::NV12,
+        PixelFormatEnum::NV21,
         PixelFormatEnum::Index8,
         // These don't seem to be supported;
         // the round-trip

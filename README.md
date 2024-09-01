@@ -2,7 +2,7 @@
 
 Bindings for SDL2 in Rust
 
-### [Changelog for 0.35.0](changelog.md#v0350)
+### [Changelog for 0.37.0](changelog.md#v0370)
 
 # Overview
 
@@ -10,24 +10,27 @@ Rust-SDL2 is a library for talking to the new SDL2.0 libraries from Rust.
 Low-level C components are wrapped in Rust code to make them more idiomatic and
 abstract away inappropriate manual memory management.
 
-Rust-SDL2 uses the MIT license.
+Rust-SDL2 uses the MIT license, but SDL2 itself is under the zlib license.
 
-If you want a library compatible with earlier versions of SDL, please see
-[here][early-sdl]
+## Available rust features 
+
+* `gfx` to link against SDL2\_gfx and have access to gfx features
+* `image` to link against SDL2\_image and have access to image reading and writing features
+* `mixer` to link against SDL2\_mixer and have access to sound mixing features
+* `ttf` to link against SDL2\_ttf and have access to various font features
+* `raw-window-handle` to enable the crate `raw-window-handle`, which is useful to interop with various other backends.
+* `unsafe-textures` to not have a lifetime in `Texture` structs. Texture are only freed when the program exits, or can be done manually through `unsafe`.
+* `use-bindgen` to customize bindings instead of using pre-generated `sdl_bindings` which were created from a Linux environment. It generates your own custom SDL2 bindings, tailored to your distro. Useful for specific window-related scenarios.
+* `use-vcpkg` to pull SDL2 from vcpkg instead of looking in your system.
+* `use-pkgconfig` use pkg-config to detect where your library is located on your system. Mostly useful on unix systems for static linking.
+* `static-link` to link to SDL2 statically instead of dynamically.
+* `use_mac_framework` to use SDL2 from a Framework, on macOS only
+* `use_ios_framework` to use SDL2 from a Framework, on iOS only
+* `bundled`, which pulls the SDL repository and compiles it from source. More information below.
 
 # Documentation
 
-* [latest crate update documentation](https://docs.rs/sdl2/).
-* [master documentation](https://rust-sdl2.github.io/rust-sdl2/sdl2/).
-
-The following features are enabled in the documentation:
-* gfx
-* image
-* mixer
-* ttf
-
-The `unsafe_textures` feature is not documented online, you can use `cargo doc` to generate your own documentation
-with this feature enabled.
+[Read the documentation here](https://docs.rs/sdl2/).
 
 # Requirements
 
@@ -37,7 +40,7 @@ We currently target the latest stable release of Rust.
 
 ## *SDL2.0 development libraries*
 
-SDL2 >= 2.0.8 is recommended to use these bindings, but note that SDL2 >= 2.0.5 is also supported. Below 2.0.5, you may experience link-time errors as some functions are used here but are not defined in SDL2. If you experience this issue because you are on a LTS machine (for instance, Ubuntu 12.04 or Ubuntu 14.04), we definitely recommend you to use the feature "bundled" which will compile the lastest stable version of SDL2 for your project.
+SDL2 >= 2.0.26 is recommended to use these bindings; below 2.0.26, you may experience link-time errors as some functions are used here but are not defined in SDL2. If you experience this issue because you are on a LTS machine (for instance, Ubuntu), we definitely recommend you to use the feature "bundled" which will compile the lastest stable version of SDL2 for your project.
 
 ### "Bundled" Feature
 
@@ -46,12 +49,14 @@ Since 0.31, this crate supports a feature named "bundled" which compiles SDL2 fr
 By default, macOS and Linux only load libraries from system directories like `/usr/lib`. If you wish to distribute the newly built libSDL2.so/libSDL2.dylib alongside your executable, you will need to add rpath to your executable. Add the following lines to `build.rs` script:
 
 ```rust
-[cfg(target_os="macos")]
+#[cfg(target_os="macos")]
 println!("cargo:rustc-link-arg=-Wl,-rpath,@loader_path");
 
-[cfg(target_os="linux")]
+#[cfg(target_os="linux")]
 println!("cargo:rustc-link-arg=-Wl,-rpath,$ORIGIN");
 ```
+
+**This ONLY works with SDL2, NOT SDL2_image, SDL2_mixer, SDL2_ttf, SDL2_gfx`
 
 ### Linux
 Install these through your favourite package management tool, or via
@@ -136,6 +141,18 @@ following in your `Cargo.toml` file:
 [features]
 default = []
 use_sdl2_mac_framework = ["sdl2/use_mac_framework"]
+```
+
+Similarly for iOS you can follow the same process using the `use_ios_framework` feature. However
+official builds of the iOS framework are not available so you must compile your own SDL2.framework.
+
+Using the iOS framework also requires adding the 'Frameworks' directory to your rpath so that the
+dynamic linker can find SDL2.framework inside your app bundle. This is done by adding this to your
+`build.rs`:
+
+```rust
+#[cfg(target_os="ios")]
+println!("cargo:rustc-link-arg=-Wl,-rpath,@loader_path/Frameworks");
 ```
 
 #### Static linking on macOS using vcpkg
@@ -334,14 +351,14 @@ add the following your `Cargo.toml`:
 
 ```toml
 [dependencies.sdl2]
-version = "0.35"
+version = "0.37"
 default-features = false
 features = ["ttf","image","gfx","mixer","static-link","use-vcpkg"]
 
 [package.metadata.vcpkg]
 dependencies = ["sdl2", "sdl2-image[libjpeg-turbo,tiff,libwebp]", "sdl2-ttf", "sdl2-gfx", "sdl2-mixer"]
 git = "https://github.com/microsoft/vcpkg"
-rev = "261c458af6e3eed5d099144aff95d2b5035f656b"
+rev = "2024.05.24" # release 2024.05.24 # to check for a new one, check https://github.com/microsoft/vcpkg/releases
 
 [package.metadata.vcpkg.target]
 x86_64-pc-windows-msvc = { triplet = "x64-windows-static-md" }
@@ -356,7 +373,7 @@ download through Crates.io:
 
 ```toml
     [dependencies]
-    sdl2 = "0.35"
+    sdl2 = "0.37"
 ```
 
 Alternatively, pull it from GitHub to obtain the latest version from master
@@ -377,7 +394,7 @@ adding this instead:
 
 ```toml
     [dependencies.sdl2]
-    version = "0.35"
+    version = "0.37"
     default-features = false
     features = ["ttf","image","gfx","mixer"]
 ```
@@ -590,59 +607,62 @@ To use Vulkan, you need a Vulkan library for Rust. This example uses the
 types for raw Vulkan object handles. The procedure to interface SDL2's Vulkan functions with these
 will be different for each one.
 
+First, make sure you enable the [`raw-window-handle`](#support-for-raw-window-handle) feature.
+
 ```rust
 extern crate sdl2;
 extern crate vulkano;
 
 use sdl2::event::Event;
 use sdl2::keyboard::Keycode;
-use sdl2::video::VkInstance;
-use std::ffi::CString;
-use vulkano::instance::{Instance, InstanceExtensions};
+use vulkano::instance::{Instance, InstanceCreateInfo, InstanceExtensions};
 use vulkano::swapchain::Surface;
-use vulkano::{Handle, Version, VulkanObject};
+use vulkano::VulkanLibrary;
 
 fn main() {
     let sdl_context = sdl2::init().unwrap();
     let video_subsystem = sdl_context.video().unwrap();
 
-    let window = video_subsystem.window("Window", 800, 600)
+    let window = video_subsystem
+        .window("Window Title - My Vulkano-SDL2 application", 1024, 768)
         .vulkan()
         .build()
         .unwrap();
 
-    let instance_extensions_strings: Vec<CString> = window
-        .vulkan_instance_extensions()
-        .unwrap()
-        .iter()
-        .map(|&v| CString::new(v).unwrap())
-        .collect();
-    let instance_extension =
-        InstanceExtensions::from(instance_extensions_strings.iter().map(AsRef::as_ref));
-    let instance = Instance::new(None, Version::V1_2, &instance_extension, None).unwrap();
-    let surface_handle = window
-        .vulkan_create_surface(instance.internal_object().as_raw() as VkInstance)
-        .unwrap();
-    let surface = unsafe {
-        Surface::from_raw_surface(instance, Handle::from_raw(surface_handle), window.context())
-    };
+    let instance_extensions =
+        InstanceExtensions::from_iter(window.vulkan_instance_extensions().unwrap());
+
+    let instance = Instance::new(
+        VulkanLibrary::new().unwrap(),
+        InstanceCreateInfo {
+            enabled_extensions: instance_extensions,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+
+    // SAFETY: Be sure not to drop the `window` before the `Surface` or vulkan `Swapchain`!
+    // (SIGSEGV otherwise)
+    let surface = unsafe { Surface::from_window_ref(instance.clone(), &window) };
 
     let mut event_pump = sdl_context.event_pump().unwrap();
 
     'running: loop {
-         for event in event_pump.poll_iter() {
+        for event in event_pump.poll_iter() {
             match event {
-                Event::Quit {..} | Event::KeyDown { keycode: Some(Keycode::Escape), .. } => {
-                    break 'running
-                },
+                Event::Quit { .. }
+                | Event::KeyDown {
+                    keycode: Some(Keycode::Escape),
+                    ..
+                } => {
+                    break 'running;
+                }
                 _ => {}
             }
         }
         ::std::thread::sleep(::std::time::Duration::new(0, 1_000_000_000u32 / 60));
     }
 }
-
-
 ```
 
 # Support for raw-window-handle
@@ -651,7 +671,7 @@ fn main() {
 
 ```toml
 [dependencies.sdl2]
-version = "0.32"
+version = "0.37"
 features = ["raw-window-handle"]
 ```
 
